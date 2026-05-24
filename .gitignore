@@ -30,5 +30,6 @@ env/
 *.DS_Store
 Thumbs.db
 
-# Claude Code internal
-.claude/
+# Claude Code internal — exclude session data, keep shared commands
+.claude/*
+!.claude/commands/
