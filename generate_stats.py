@@ -1,7 +1,7 @@
 """
-generate_stats.py  --  Informe Econometrico SPX Open Predictor
+generate_stats.py  --  Informe Econometrico S&P 500 Open Predictor
 ==============================================================
-Estructura de 10 consignas (espejo del TP de Econometria):
+Estructura de 10 consignas :
 
   C1.  Estadisticas descriptivas univariadas y bivariadas
   C2.  Especificacion del modelo y signos esperados
