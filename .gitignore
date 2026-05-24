@@ -5,6 +5,10 @@ spx_data.csv
 reports/
 spx_prediction_report_*.html
 spx_stats_report_*.html
+spx_informe_econometrico_*.html
+
+# Temporary / scratch files
+pdf_content.txt
 
 # Python
 __pycache__/
