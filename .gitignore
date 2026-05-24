@@ -1,0 +1,30 @@
+# Data — re-generate with fetch_data.py --full
+spx_data.csv
+
+# Generated reports — excluded to keep history clean
+reports/
+spx_prediction_report_*.html
+spx_stats_report_*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Claude Code internal
+.claude/
