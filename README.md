@@ -1,4 +1,4 @@
-# SPX Open Predictor
+# S&P 500 Open Predictor
 
 > Binary classification model that predicts whether the S&P 500 will open **UP or DOWN** relative to the prior close.  
 > Built to generate edge against Polymarket's daily *"S&P 500 Opens Up or Down"* markets.
