@@ -43,7 +43,7 @@ Example: model says 65% UP, Poly shows 55% → edge = 10pp → consider trade.
 import argparse
 import json
 import warnings
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +69,69 @@ MODEL_PARAMS = dict(
 TRAIN_WARMUP   = 250   # trading days for initial warm-up (~1 year)
 RETRAIN_PERIOD = 21    # retrain every N days (monthly)
 MIN_EDGE       = 0.08  # minimum edge vs Polymarket to consider a trade
+
+
+# ── NYSE Holiday Calendar ─────────────────────────────────────────────────────
+# Maintained through 2027. Update annually or switch to pandas_market_calendars.
+NYSE_HOLIDAYS = {
+    # 2020
+    '2020-01-01', '2020-01-20', '2020-02-17', '2020-04-10',
+    '2020-05-25', '2020-07-03', '2020-09-07', '2020-11-26', '2020-12-25',
+    # 2021
+    '2021-01-01', '2021-01-18', '2021-02-15', '2021-04-02',
+    '2021-05-31', '2021-07-05', '2021-09-06', '2021-11-25', '2021-12-24',
+    # 2022
+    '2022-01-17', '2022-02-21', '2022-04-15', '2022-05-30',
+    '2022-06-20', '2022-07-04', '2022-09-05', '2022-11-24', '2022-12-26',
+    # 2023
+    '2023-01-02', '2023-01-16', '2023-02-20', '2023-04-07',
+    '2023-05-29', '2023-07-04', '2023-09-04', '2023-11-23', '2023-12-25',
+    # 2024
+    '2024-01-01', '2024-01-15', '2024-02-19', '2024-03-29',
+    '2024-05-27', '2024-07-04', '2024-09-02', '2024-11-28', '2024-12-25',
+    # 2025
+    '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
+    '2025-05-26', '2025-07-04', '2025-09-01', '2025-11-27', '2025-12-25',
+    # 2026
+    '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03',
+    '2026-05-25', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
+    # 2027
+    '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26',
+    '2027-05-31', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24',
+}
+
+
+def is_trading_day(d) -> bool:
+    """Return True if d is a NYSE trading day (weekday, not a holiday)."""
+    if isinstance(d, str):
+        d = datetime.strptime(d, '%Y-%m-%d').date()
+    elif isinstance(d, datetime):
+        d = d.date()
+    return d.weekday() < 5 and d.strftime('%Y-%m-%d') not in NYSE_HOLIDAYS
+
+
+def next_trading_day(from_date=None) -> date:
+    """
+    Return the next NYSE trading day strictly after from_date.
+    If from_date is None, uses today.
+
+    Examples
+    --------
+    Called on Friday 2026-05-22  -> returns Monday 2026-05-25 (Memorial Day)
+                                     skips it  -> returns Tuesday 2026-05-26
+    Called on Friday 2026-05-29  -> returns Monday 2026-06-01
+    """
+    if from_date is None:
+        from_date = datetime.today().date()
+    elif isinstance(from_date, str):
+        from_date = datetime.strptime(from_date, '%Y-%m-%d').date()
+    elif isinstance(from_date, datetime):
+        from_date = from_date.date()
+
+    candidate = from_date + timedelta(days=1)
+    while not is_trading_day(candidate):
+        candidate += timedelta(days=1)
+    return candidate
 
 
 # ── Feature Engineering ────────────────────────────────────────────────────────
@@ -194,25 +257,52 @@ def fit_final_model(feat: pd.DataFrame):
 
 # ── Prediction ─────────────────────────────────────────────────────────────────
 def predict_next_day(
-    model, scaler, feat: pd.DataFrame, target_date: str = None
+    model, scaler, feat: pd.DataFrame, target_date=None
 ) -> dict:
     """
-    Predict open direction for target_date (or next trading day if None).
-    Returns dict with signal, probabilities, and context.
+    Predict open direction for target_date.
+
+    If target_date is None, automatically computes the next NYSE trading day
+    after the last date in feat. If a string 'YYYY-MM-DD' is provided, that
+    date is used (and a warning is shown if it is not a trading day).
+
+    All market features (returns, VIX, volatility, etc.) come from the last
+    row of available data — only calendar features are overridden to match
+    the actual target date so day-of-week / month effects are correct.
     """
-    last_row = feat.iloc[-1:]
+    # ── Resolve target date ────────────────────────────────────────────────
+    last_data_date = feat.index[-1].date()
+
+    if target_date is None:
+        tgt = next_trading_day(last_data_date)
+    else:
+        if isinstance(target_date, str):
+            tgt = datetime.strptime(target_date, '%Y-%m-%d').date()
+        else:
+            tgt = target_date
+        if not is_trading_day(tgt):
+            print(f"  WARNING: {tgt} is not a trading day — prediction may be unreliable.")
+
+    # ── Build feature row ──────────────────────────────────────────────────
+    last_row = feat.iloc[-1:].copy()
+
+    # Override calendar features with the actual target date
+    last_row['day_of_week'] = tgt.weekday()          # 0=Mon … 4=Fri
+    last_row['is_monday']   = int(tgt.weekday() == 0)
+    last_row['month']       = tgt.month
+
     X = scaler.transform(last_row[FEATURE_COLS].values)
     prob_up   = float(model.predict_proba(X)[0, 1])
     prob_down = 1 - prob_up
     signal    = 'UP' if prob_up >= 0.5 else 'DOWN'
-    confidence = max(prob_up, prob_down)
 
     return {
-        'target_date': target_date or 'next trading day',
+        'target_date': tgt.strftime('%Y-%m-%d'),
         'signal':      signal,
         'prob_up':     round(prob_up * 100, 1),
         'prob_down':   round(prob_down * 100, 1),
-        'confidence':  round(confidence * 100, 1),
+        'confidence':  round(max(prob_up, prob_down) * 100, 1),
+        'data_as_of':  str(last_data_date),
     }
 
 
@@ -289,11 +379,12 @@ def main():
     # ── Prediction ─────────────────────────────────────────────────────────
     prediction = predict_next_day(model, scaler, feat, args.date)
     print(f"\n{'='*50}")
-    print(f"  PREDICTION: {prediction['target_date']}")
-    print(f"  Signal:     {prediction['signal']}")
-    print(f"  P(Up):      {prediction['prob_up']}%")
-    print(f"  P(Down):    {prediction['prob_down']}%")
-    print(f"  Confidence: {prediction['confidence']}%")
+    print(f"  TARGET DATE:  {prediction['target_date']}")
+    print(f"  Data as of:   {prediction['data_as_of']}")
+    print(f"  Signal:       {prediction['signal']}")
+    print(f"  P(Up):        {prediction['prob_up']}%")
+    print(f"  P(Down):      {prediction['prob_down']}%")
+    print(f"  Confidence:   {prediction['confidence']}%")
 
     # ── Polymarket edge ────────────────────────────────────────────────────
     if args.poly is not None:
@@ -306,7 +397,7 @@ def main():
 
     # ── Save report ────────────────────────────────────────────────────────
     if args.report:
-        date_str = args.date or datetime.today().strftime('%Y-%m-%d')
+        date_str = prediction['target_date']   # always use the predicted date
         recent   = res.tail(20).copy()
         recent['correct'] = (recent['actual'] == recent['pred'])
         output = {

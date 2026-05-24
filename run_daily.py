@@ -3,20 +3,19 @@ run_daily.py — Daily automation script
 =======================================
 Fetches data, runs the model, saves report, optionally sends Telegram alert.
 
-SCHEDULE (cron)
----------------
-Run at 9:00 AM ET on trading days (Mon-Fri):
-    0 9 * * 1-5 cd /path/to/spx-predictor && python run_daily.py
+Automatically predicts for the next NYSE trading day — handles weekends,
+holidays, and arbitrary run times (run on Friday -> predicts Monday).
 
-Or with Windows Task Scheduler / macOS launchd.
+SCHEDULE (cron / Task Scheduler)
+---------------------------------
+Run at 9:00 AM ET on weekdays:
+    Linux/macOS:  0 14 * * 1-5 cd /path/to/spx-predictor && python run_daily.py
+    Windows:      Task Scheduler -> Daily 9:00 AM, Mon-Fri
 
 TELEGRAM ALERTS (optional)
 ---------------------------
-Set these env vars for Telegram notifications:
-    TELEGRAM_TOKEN=your_bot_token
-    TELEGRAM_CHAT_ID=your_chat_id
-
-Get a bot token from @BotFather on Telegram.
+    export TELEGRAM_TOKEN=your_bot_token
+    export TELEGRAM_CHAT_ID=your_chat_id
 """
 
 import os
@@ -26,26 +25,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-
-def is_trading_day() -> bool:
-    """Simple check: Mon-Fri, not a US market holiday."""
-    import pandas as pd
-    today = pd.Timestamp.today()
-    if today.weekday() >= 5:  # Saturday or Sunday
-        return False
-    # Common US market holidays (approximate — use pandas_market_calendars for precision)
-    holidays = [
-        '2026-01-01',  # New Year's
-        '2026-01-19',  # MLK Day
-        '2026-02-16',  # Presidents Day
-        '2026-04-03',  # Good Friday
-        '2026-05-25',  # Memorial Day
-        '2026-07-04',  # Independence Day
-        '2026-09-07',  # Labor Day
-        '2026-11-26',  # Thanksgiving
-        '2026-12-25',  # Christmas
-    ]
-    return today.strftime('%Y-%m-%d') not in holidays
+# Import shared trading-day logic from model.py
+from model import next_trading_day, is_trading_day
 
 
 def send_telegram(message: str):
@@ -56,7 +37,9 @@ def send_telegram(message: str):
         return
     import urllib.request, urllib.parse
     url  = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = urllib.parse.urlencode({'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}).encode()
+    data = urllib.parse.urlencode({
+        'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'
+    }).encode()
     try:
         urllib.request.urlopen(url, data, timeout=10)
         print("Telegram notification sent.")
@@ -65,33 +48,37 @@ def send_telegram(message: str):
 
 
 def format_telegram_message(output: dict) -> str:
-    signal_emoji = '🟢' if output['signal'] == 'UP' else '🔴'
+    signal_emoji = 'UP' if output['signal'] == 'UP' else 'DOWN'
     return (
         f"<b>SPX Open Predictor</b>\n"
-        f"📅 {output.get('target_date', 'N/A')}\n\n"
-        f"{signal_emoji} Signal: <b>{output['signal']}</b>\n"
-        f"P(Up):   {output['prob_up']}%\n"
-        f"P(Down): {output['prob_down']}%\n"
+        f"Predicting: {output.get('target_date', 'N/A')} "
+        f"(data as of {output.get('data_as_of', 'N/A')})\n\n"
+        f"Signal: <b>{signal_emoji}</b>\n"
+        f"P(Up):      {output['prob_up']}%\n"
+        f"P(Down):    {output['prob_down']}%\n"
         f"Confidence: {output['confidence']}%\n\n"
         f"Last Close: {output.get('last_close', 'N/A')}\n"
-        f"VIX: {output.get('last_vix', 'N/A')}\n\n"
-        f"Model Accuracy (WF): {output.get('model_accuracy', 'N/A')}%\n"
-        f"⚠ Synthetic data — replace with live feed for real accuracy"
+        f"VIX:        {output.get('last_vix', 'N/A')}\n\n"
+        f"Model Accuracy (walk-forward): {output.get('model_accuracy', 'N/A')}%"
     )
 
 
 def main():
-    today = datetime.today().strftime('%Y-%m-%d')
-    print(f"\n{'='*50}")
-    print(f"SPX Predictor Daily Run — {today}")
-    print(f"{'='*50}\n")
+    today      = datetime.today().date()
+    target     = next_trading_day(today)   # e.g. Friday -> Monday, pre-holiday -> day after
 
-    if not is_trading_day():
-        print("Not a trading day. Skipping.")
+    print(f"\n{'='*52}")
+    print(f"  SPX Predictor — run date: {today}")
+    print(f"  Predicting for:           {target}")
+    print(f"{'='*52}\n")
+
+    # Skip if today itself is not a trading day (e.g. Task Scheduler fires on a holiday)
+    if not is_trading_day(today):
+        print(f"{today} is not a trading day. Skipping.")
         return
 
-    # Step 1: Fetch latest data
-    print("Step 1: Fetching data...")
+    # ── Step 1: Fetch latest data ──────────────────────────────────────────
+    print("Step 1: Fetching latest market data...")
     result = subprocess.run(
         [sys.executable, 'fetch_data.py'],
         capture_output=True, text=True
@@ -101,10 +88,10 @@ def main():
         print("ERROR fetching data:", result.stderr)
         return
 
-    # Step 2: Run model and save report
-    print("Step 2: Running model...")
+    # ── Step 2: Run model and save JSON report for target date ─────────────
+    print(f"Step 2: Running model (target: {target})...")
     result = subprocess.run(
-        [sys.executable, 'model.py', '--report'],
+        [sys.executable, 'model.py', '--date', str(target), '--report'],
         capture_output=True, text=True
     )
     print(result.stdout)
@@ -112,17 +99,16 @@ def main():
         print("ERROR running model:", result.stderr)
         return
 
-    # Step 3: Load report and send notification
-    report_path = Path('reports') / f"prediction_{today}.json"
+    # ── Step 3: Load report and send notification ──────────────────────────
+    report_path = Path('reports') / f"prediction_{target}.json"
     if report_path.exists():
         with open(report_path) as f:
             output = json.load(f)
-        msg = format_telegram_message(output)
-        send_telegram(msg)
-        print(f"\nReport: {report_path}")
+        send_telegram(format_telegram_message(output))
+        print(f"\nReport saved: {report_path}")
         print(f"Signal: {output['signal']} | P(Up): {output['prob_up']}%")
     else:
-        print("Report not found.")
+        print(f"Report not found at {report_path}")
 
     print("\nDone.")
 
